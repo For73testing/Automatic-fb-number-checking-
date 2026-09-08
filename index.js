@@ -137,8 +137,8 @@ async function fetchAndSyncNumbers() {
     }
 
     // Process up to 100 numbers for this batch
-    const batchNumbers = allLines.slice(0, 10);
-    const remainingLines = allLines.slice(10);
+    const batchNumbers = allLines.slice(0, 100);
+    const remainingLines = allLines.slice(100);
 
     console.log(`LOG: Extracted batch of ${batchNumbers.length} numbers from master.`);
 
