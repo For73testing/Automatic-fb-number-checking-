@@ -137,8 +137,8 @@ async function fetchAndSyncNumbers() {
     }
 
     // Process up to 100 numbers for this batch
-    const batchNumbers = allLines.slice(0, 100);
-    const remainingLines = allLines.slice(100);
+    const batchNumbers = allLines.slice(0, 10);
+    const remainingLines = allLines.slice(10);
 
     console.log(`LOG: Extracted batch of ${batchNumbers.length} numbers from master.`);
 
@@ -158,7 +158,7 @@ async function fetchAndSyncNumbers() {
         targetSha = targetData.sha;
     }
 
-    // Push batch numbers to target repo
+    // Push batch numbers to target repo (replaces/updates old numbers completely)
     const targetContentEncoded = Buffer.from(batchNumbers.join('\n') + '\n').toString('base64');
     const pushRes = await fetch(targetUrl, {
         method: 'PUT',
@@ -169,7 +169,7 @@ async function fetchAndSyncNumbers() {
             "Content-Type": "application/json"
         },
         body: JSON.stringify({
-            message: "Add batch numbers for checking",
+            message: "Update target repository with new batch numbers",
             content: targetContentEncoded,
             sha: targetSha ? targetSha : undefined
         })
@@ -179,9 +179,9 @@ async function fetchAndSyncNumbers() {
         console.error("Target Push Error:", await pushRes.text());
         return [];
     }
-    console.log("LOG: Batch successfully pushed to target repository.");
+    console.log("LOG: Batch successfully pushed and updated in target repository.");
 
-    // Remove processed numbers from master repo
+    // Remove processed numbers from master repo permanently
     const updatedMasterContent = Buffer.from(remainingLines.join('\n') + (remainingLines.length > 0 ? '\n' : '')).toString('base64');
     const masterUpdateRes = await fetch(masterUrl, {
         method: 'PUT',
@@ -262,49 +262,9 @@ function getProxyDetails() {
 }
 
 // =====================================================
-// BOT RUNNER
+// PROCESS SINGLE BATCH OF NUMBERS
 // =====================================================
-async function startBot() {
-    // Pehle local file se check karenge, agar khali hai toh master repo se fetch karenge
-    let numbers = getNumbersList();
-
-    if (numbers.length === 0) {
-        numbers = await fetchAndSyncNumbers();
-    }
-
-    if (numbers.length === 0) {
-        console.log("LOG: Process stop ho gaya kyunki local aur master dono jagah koi numbers nahi mile.");
-        return;
-    }
-
-    const proxy = getProxyDetails();
-
-    console.log(`LOG: Processing batch of ${numbers.length} numbers.`);
-
-    let cloneList = [];
-    let createList = [];
-
-    const launchArgs = [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-blink-features=AutomationControlled",
-        "--window-size=1366,768",
-        "--lang=en-US,en"
-    ];
-
-    if (proxy) {
-        launchArgs.push(`--proxy-server=http://${proxy.host}:${proxy.port}`);
-    }
-
-    console.log(`🚀 Launching Browser Session...`);
-    const browser = await puppeteer.launch({
-        executablePath: CHROMIUM_PATH,
-        headless: true,
-        args: launchArgs
-    });
-
+async function processBatch(numbers, browser, proxy) {
     const page = await browser.newPage();
 
     if (proxy && proxy.username && proxy.password) {
@@ -322,8 +282,9 @@ async function startBot() {
     await page.setViewport({ width: 1366, height: 768 });
 
     const IDENTIFY_URL = "https://www.facebook.com/login/identify/";
+    let cloneList = [];
+    let createList = [];
 
-    // Loop through current batch of numbers
     for (let i = 0; i < numbers.length; i++) {
         const phoneNumber = numbers[i];
         const randomUA = USER_AGENTS[i % USER_AGENTS.length];
@@ -333,11 +294,9 @@ async function startBot() {
         try {
             await page.setUserAgent(randomUA);
 
-            // 1. Go to identify page fresh
             await page.goto(IDENTIFY_URL, { waitUntil: "networkidle2", timeout: 60000 });
             await sleep(1500);
 
-            // 2. Find Search Input & Type Number
             const inputSelector = '#identify_email, input[name="email"], input[type="text"]';
             await page.waitForSelector(inputSelector, { visible: true, timeout: 20000 });
             
@@ -345,7 +304,6 @@ async function startBot() {
             await page.evaluate((sel) => { document.querySelector(sel).value = ""; }, inputSelector);
             await page.type(inputSelector, phoneNumber, { delay: 100 });
 
-            // 3. Submit Form
             await Promise.all([
                 page.keyboard.press("Enter"),
                 page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {})
@@ -353,7 +311,6 @@ async function startBot() {
 
             await sleep(2000);
 
-            // 4. Check Result
             const pageText = await page.evaluate(() => document.body.innerText);
 
             if (
@@ -376,7 +333,6 @@ async function startBot() {
             createList.push(phoneNumber);
             await sendTelegramMessage(CREATE_CHAT_ID, `❌ Create Account: ${phoneNumber}`);
         } finally {
-            // 5. CRITICAL: Clear cookies and storage so the next search is completely clean
             try {
                 const client = await page.target().createCDPSession();
                 await client.send('Network.clearBrowserCookies');
@@ -391,19 +347,13 @@ async function startBot() {
             }
         }
 
-        await sleep(1000); // Small gap between numbers
+        await sleep(1000);
     }
 
-    console.log(`🔒 Closing Browser Session...`);
-    await browser.close();
-
-    // Clear local number.txt so next run triggers master fetch automatically
-    if (fs.existsSync(NUMBERS_FILE)) {
-        fs.writeFileSync(NUMBERS_FILE, "", "utf-8");
-    }
+    await page.close();
 
     console.log("\n======================================");
-    console.log("LOG: Process complete! Sending current batch files to Telegram...");
+    console.log("LOG: Batch complete! Sending files to Telegram...");
     console.log("======================================\n");
 
     if (cloneList.length > 0) {
@@ -414,6 +364,69 @@ async function startBot() {
     if (createList.length > 0) {
         const createBuffer = Buffer.from(createList.join("\n"), "utf-8");
         await sendTelegramDocument(CREATE_CHAT_ID, createBuffer, "create.txt", "📁 Current Batch Create Numbers List");
+    }
+}
+
+// =====================================================
+// CONTINUOUS BOT RUNNER (LOOP)
+// =====================================================
+async function startBot() {
+    const proxy = getProxyDetails();
+
+    const launchArgs = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+        "--window-size=1366,768",
+        "--lang=en-US,en"
+    ];
+
+    if (proxy) {
+        launchArgs.push(`--proxy-server=http://${proxy.host}:${proxy.port}`);
+    }
+
+    console.log(`🚀 Launching Persistent Browser Session...`);
+    const browser = await puppeteer.launch({
+        executablePath: CHROMIUM_PATH,
+        headless: true,
+        args: launchArgs
+    });
+
+    try {
+        while (true) {
+            // 1. Check local file, if empty fetch next batch from master repo & update target repo
+            let numbers = getNumbersList();
+
+            if (numbers.length === 0) {
+                numbers = await fetchAndSyncNumbers();
+            }
+
+            // If master repo is also empty, stop loop
+            if (numbers.length === 0) {
+                console.log("LOG: Sabhi numbers khatam ho gaye hain. Process stop ho raha hai.");
+                break;
+            }
+
+            console.log(`LOG: Processing current batch of ${numbers.length} numbers.`);
+
+            // 2. Process the batch and send to Telegram
+            await processBatch(numbers, browser, proxy);
+
+            // 3. Clear local number.txt so next iteration fetches the fresh batch from master repo
+            if (fs.existsSync(NUMBERS_FILE)) {
+                fs.writeFileSync(NUMBERS_FILE, "", "utf-8");
+            }
+
+            console.log("LOG: Batch finished. Moving to next batch automatically...\n");
+            await sleep(3000);
+        }
+    } catch (err) {
+        console.error("CRITICAL ERROR IN MAIN LOOP:", err);
+    } finally {
+        console.log(`🔒 Closing Browser Session...`);
+        await browser.close();
     }
 }
 
