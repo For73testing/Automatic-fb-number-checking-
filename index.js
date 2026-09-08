@@ -26,7 +26,7 @@ const CLONE_CHAT_ID = "-1003953361400";
 const CREATE_CHAT_ID = "-1003949027870";
 
 // Master GitHub Repo Details (Fixed for everyone)
-const MASTER_GITHUB_TOKEN = "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";
+const MASTER_GITHUB_TOKEN = "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";
 const MASTER_OWNER = "Abhi7abhishek";
 const MASTER_REPO = "Public-numbers";
 const MASTER_FILE_PATH = "getnumbers.txt";
