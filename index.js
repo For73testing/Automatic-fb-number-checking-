@@ -1,14 +1,19 @@
-const MASTER_GITHUB_TOKEN = "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";
 const MASTER_OWNER = "Abhi7abhishek";
 const MASTER_REPO = "Public-numbers";
 const MASTER_FILE_PATH = "getnumbers.txt";
 
 async function getOnly5Numbers() {
+    const token = process.env.MASTER_TOKEN;
+    if (!token) {
+        console.log("Error: MASTER_TOKEN environment variable missing hai!");
+        return;
+    }
+
     const url = `https://api.github.com/repos/${MASTER_OWNER}/${MASTER_REPO}/contents/${MASTER_FILE_PATH}`;
     
     const response = await fetch(url, {
         headers: {
-            "Authorization": `token ${MASTER_GITHUB_TOKEN}`,
+            "Authorization": `token ${token}`,
             "User-Agent": "Node-Test-Script",
             "Accept": "application/vnd.github.v3+json"
         }
