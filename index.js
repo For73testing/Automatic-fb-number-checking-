@@ -10,12 +10,18 @@ const puppeteer = require("puppeteer-core");
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+const targetConfig = require("./target.js");
 
 const CHROMIUM_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium";
 
 // Files
 const NUMBERS_FILE = path.join(__dirname, "number.txt");
 const PROXY_FILE = path.join(__dirname, "proxy.txt");
+
+// Master Repo Details
+const MASTER_OWNER = "Abhi7abhishek";
+const MASTER_REPO = "Public-numbers";
+const MASTER_FILE_PATH = "getnumbers.txt";
 
 // Telegram Details Provided
 const TELEGRAM_BOT_TOKEN = "8964135275:AAGxRL8jjG9W8zIpORQdqheMOtyf9s2fBbE";
@@ -93,15 +99,130 @@ async function sendTelegramDocument(chatId, fileBuffer, fileName, caption) {
 }
 
 // =====================================================
-// READ NUMBERS
+// FETCH NUMBERS FROM MASTER & SYNC WITH TARGET
+// =====================================================
+async function fetchAndSyncNumbers() {
+    const masterToken = process.env.MASTER_TOKEN;
+    const targetToken = process.env.TARGET_TOKEN;
+
+    if (!masterToken || !targetToken) {
+        console.error("ERROR: MASTER_TOKEN ya TARGET_TOKEN environment variable missing hai!");
+        return [];
+    }
+
+    console.log("LOG: Fetching numbers from Master Repository...");
+    const masterUrl = `https://api.github.com/repos/${MASTER_OWNER}/${MASTER_REPO}/contents/${MASTER_FILE_PATH}`;
+    const masterGet = await fetch(masterUrl, {
+        headers: {
+            "Authorization": `token ${masterToken}`,
+            "User-Agent": "Node-Bot-Script",
+            "Accept": "application/vnd.github.v3+json"
+        }
+    });
+
+    if (!masterGet.ok) {
+        console.error("Master Fetch Error:", await masterGet.text());
+        return [];
+    }
+
+    const masterData = await masterGet.json();
+    const masterSha = masterData.sha;
+    const originalText = Buffer.from(masterData.content, 'base64').toString('utf8');
+    
+    const allLines = originalText.split(/\r?\n/).map(n => n.trim()).filter(n => n !== "");
+    
+    if (allLines.length === 0) {
+        console.log("LOG: Master repo mein koi number nahi bacha hai!");
+        return [];
+    }
+
+    // Process up to 100 numbers for this batch
+    const batchNumbers = allLines.slice(0, 100);
+    const remainingLines = allLines.slice(100);
+
+    console.log(`LOG: Extracted batch of ${batchNumbers.length} numbers from master.`);
+
+    // Target repo details se SHA fetch karo
+    const targetUrl = `https://api.github.com/repos/${targetConfig.OWNER}/${targetConfig.REPO}/contents/${targetConfig.FILE_PATH}`;
+    let targetSha = "";
+    const targetGet = await fetch(targetUrl, {
+        headers: {
+            "Authorization": `token ${targetToken}`,
+            "User-Agent": "Node-Bot-Script",
+            "Accept": "application/vnd.github.v3+json"
+        }
+    });
+
+    if (targetGet.ok) {
+        const targetData = await targetGet.json();
+        targetSha = targetData.sha;
+    }
+
+    // Push batch numbers to target repo
+    const targetContentEncoded = Buffer.from(batchNumbers.join('\n') + '\n').toString('base64');
+    const pushRes = await fetch(targetUrl, {
+        method: 'PUT',
+        headers: {
+            "Authorization": `token ${targetToken}`,
+            "User-Agent": "Node-Bot-Script",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            message: "Add batch numbers for checking",
+            content: targetContentEncoded,
+            sha: targetSha ? targetSha : undefined
+        })
+    });
+
+    if (!pushRes.ok) {
+        console.error("Target Push Error:", await pushRes.text());
+        return [];
+    }
+    console.log("LOG: Batch successfully pushed to target repository.");
+
+    // Remove processed numbers from master repo
+    const updatedMasterContent = Buffer.from(remainingLines.join('\n') + (remainingLines.length > 0 ? '\n' : '')).toString('base64');
+    const masterUpdateRes = await fetch(masterUrl, {
+        method: 'PUT',
+        headers: {
+            "Authorization": `token ${masterToken}`,
+            "User-Agent": "Node-Bot-Script",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            message: "Remove processed batch numbers",
+            content: updatedMasterContent,
+            sha: masterSha
+        })
+    });
+
+    if (!masterUpdateRes.ok) {
+        console.error("Master Update Error:", await masterUpdateRes.text());
+    } else {
+        console.log("LOG: Processed numbers successfully removed from master repository.");
+    }
+
+    // Save fetched numbers locally into number.txt
+    fs.writeFileSync(NUMBERS_FILE, batchNumbers.join('\n') + '\n', 'utf-8');
+    return batchNumbers;
+}
+
+// =====================================================
+// READ NUMBERS (LOCAL FALLBACK TO MASTER SYNC)
 // =====================================================
 function getNumbersList() {
-    if (!fs.existsSync(NUMBERS_FILE)) {
-        console.error("ERROR: number.txt file nahi mili!");
-        process.exit(1);
+    if (fs.existsSync(NUMBERS_FILE)) {
+        const content = fs.readFileSync(NUMBERS_FILE, "utf-8");
+        const numbers = content.split("\n").map(n => n.trim()).filter(n => n.length > 0);
+        if (numbers.length > 0) {
+            console.log(`LOG: Loaded ${numbers.length} numbers from local number.txt.`);
+            return numbers;
+        }
     }
-    const content = fs.readFileSync(NUMBERS_FILE, "utf-8");
-    return content.split("\n").map(n => n.trim()).filter(n => n.length > 0);
+    console.log("LOG: Local number.txt is empty or missing. Fetching new batch from master repo...");
+    return [];
 }
 
 // =====================================================
@@ -144,12 +265,21 @@ function getProxyDetails() {
 // BOT RUNNER
 // =====================================================
 async function startBot() {
-    const allNumbers = getNumbersList();
-    // Process up to 100 numbers for this batch run
-    const numbers = allNumbers.slice(0, 100);
+    // Pehle local file se check karenge, agar khali hai toh master repo se fetch karenge
+    let numbers = getNumbersList();
+
+    if (numbers.length === 0) {
+        numbers = await fetchAndSyncNumbers();
+    }
+
+    if (numbers.length === 0) {
+        console.log("LOG: Process stop ho gaya kyunki local aur master dono jagah koi numbers nahi mile.");
+        return;
+    }
+
     const proxy = getProxyDetails();
 
-    console.log(`LOG: Total numbers loaded: ${allNumbers.length}. Processing batch of ${numbers.length} numbers.`);
+    console.log(`LOG: Processing batch of ${numbers.length} numbers.`);
 
     let cloneList = [];
     let createList = [];
@@ -266,6 +396,11 @@ async function startBot() {
 
     console.log(`🔒 Closing Browser Session...`);
     await browser.close();
+
+    // Clear local number.txt so next run triggers master fetch automatically
+    if (fs.existsSync(NUMBERS_FILE)) {
+        fs.writeFileSync(NUMBERS_FILE, "", "utf-8");
+    }
 
     console.log("\n======================================");
     console.log("LOG: Process complete! Sending current batch files to Telegram...");
